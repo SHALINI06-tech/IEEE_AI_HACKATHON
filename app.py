@@ -2,9 +2,9 @@ import streamlit as st
 from typing import List, Dict, Any
 from dataclasses import dataclass
 import numpy as np
-import faiss
 from sentence_transformers import SentenceTransformer
 import openai
+import os
 
 # Import your custom chunker & classifier
 from winning_technical_implementation import DocumentChunker, QueryClassifier
@@ -27,36 +27,38 @@ class RAGService:
         self.classifier = QueryClassifier()
         self.document_chunks: List[Dict[str,Any]] = []
         self.embeddings = None
-        self.index = None
 
     def ingest_document(self, text: str):
         self.document_chunks = self.chunker.chunk_document(text)
         texts = [c['text'] for c in self.document_chunks]
         embs = self.encoder.encode(texts, show_progress_bar=True)
-        embs = np.array(embs).astype('float32')
-        faiss.normalize_L2(embs)
-        self.embeddings = embs
-        dim = embs.shape[1]
-        self.index = faiss.IndexFlatIP(dim)
-        self.index.add(embs)
+        self.embeddings = np.array(embs).astype('float32')
+        # Normalize embeddings
+        norms = np.linalg.norm(self.embeddings, axis=1, keepdims=True)
+        self.embeddings = self.embeddings / norms
         st.success(f"Ingested {len(self.document_chunks)} chunks.")
 
     def search_chunks(self, query: str, top_k=5) -> List[CitationOut]:
         qtype, _ = self.classifier.classify_query(query)
         q_emb = self.encoder.encode([query]).astype('float32')
-        faiss.normalize_L2(q_emb)
-        D, I = self.index.search(q_emb, top_k*3)
+        q_emb = q_emb / np.linalg.norm(q_emb)  # normalize
+
+        # Cosine similarity
+        scores = np.dot(self.embeddings, q_emb.T).flatten()
+        top_indices = scores.argsort()[::-1][:top_k*3]
+
         results = []
-        for score, idx in zip(D[0], I[0]):
+        for idx in top_indices:
             if idx < 0 or idx >= len(self.document_chunks):
                 continue
             chunk = self.document_chunks[idx]
             base_weight = {'mandatory':1.0,'guideline':0.8,'recommendation':0.6}.get(
                 chunk.get('legal_weight','recommendation'),0.6)
-            adjusted = float(score) * base_weight
+            adjusted = float(scores[idx]) * base_weight
             if qtype == 'compliance' and chunk.get('legal_weight') == 'mandatory':
                 adjusted *= 1.3
             results.append((adjusted, idx))
+
         results.sort(key=lambda x: x[0], reverse=True)
         seen, out = set(), []
         for adjusted, idx in results:
@@ -94,6 +96,8 @@ class RAGService:
     def generate_answer_with_citations(self, query: str, top_k=5, model="gpt-4o-mini"):
         citations = self.search_chunks(query, top_k)
         prompt = self._build_prompt(query, citations)
+
+        openai.api_key = os.getenv("OPENAI_API_KEY")
         resp = openai.ChatCompletion.create(
             model=model,
             messages=[{"role":"user","content":prompt}],
@@ -130,3 +134,5 @@ if st.button("Ask") and query:
         st.subheader("Citations:")
         for c in result['citations']:
             st.write(c)
+
+
