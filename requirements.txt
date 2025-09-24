@@ -1,6 +1,7 @@
 streamlit==1.30.0
 numpy==1.26.0
-faiss-cpu==1.7.4.post2   # <-- Use the post2 version for PyPI install
 sentence-transformers==2.2.2
 openai==1.33.0
+
+
 
