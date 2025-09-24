@@ -2,7 +2,6 @@ import streamlit as st
 from typing import List, Dict, Any
 from dataclasses import dataclass
 import numpy as np
-from sentence_transformers import SentenceTransformer
 import openai
 import os
 
@@ -21,18 +20,25 @@ class CitationOut:
 
 # --- RAG Service ---
 class RAGService:
-    def __init__(self, model_name='sentence-transformers/all-MiniLM-L6-v2'):
-        self.encoder = SentenceTransformer(model_name)
+    def __init__(self):
         self.chunker = DocumentChunker()
         self.classifier = QueryClassifier()
         self.document_chunks: List[Dict[str,Any]] = []
         self.embeddings = None
 
+    def get_embedding(self, text: str):
+        """Get OpenAI embedding for a piece of text."""
+        resp = openai.Embedding.create(
+            input=text,
+            model="text-embedding-ada-002"
+        )
+        return np.array(resp['data'][0]['embedding'], dtype='float32')
+
     def ingest_document(self, text: str):
         self.document_chunks = self.chunker.chunk_document(text)
-        texts = [c['text'] for c in self.document_chunks]
-        embs = self.encoder.encode(texts, show_progress_bar=True)
-        self.embeddings = np.array(embs).astype('float32')
+        # Compute embeddings for all chunks
+        embs = [self.get_embedding(c['text']) for c in self.document_chunks]
+        self.embeddings = np.vstack(embs)
         # Normalize embeddings
         norms = np.linalg.norm(self.embeddings, axis=1, keepdims=True)
         self.embeddings = self.embeddings / norms
@@ -40,11 +46,11 @@ class RAGService:
 
     def search_chunks(self, query: str, top_k=5) -> List[CitationOut]:
         qtype, _ = self.classifier.classify_query(query)
-        q_emb = self.encoder.encode([query]).astype('float32')
+        q_emb = self.get_embedding(query)
         q_emb = q_emb / np.linalg.norm(q_emb)  # normalize
 
         # Cosine similarity
-        scores = np.dot(self.embeddings, q_emb.T).flatten()
+        scores = np.dot(self.embeddings, q_emb)
         top_indices = scores.argsort()[::-1][:top_k*3]
 
         results = []
@@ -113,7 +119,7 @@ class RAGService:
         }
 
 # --- Streamlit UI ---
-st.title("📄 Dynamic Legal Document QA (RAG)")
+st.title("📄 Dynamic Legal Document QA (RAG) with OpenAI embeddings")
 
 uploaded_file = st.file_uploader("Upload a legal document (.txt)", type=["txt"])
 rag = RAGService()
@@ -134,5 +140,4 @@ if st.button("Ask") and query:
         st.subheader("Citations:")
         for c in result['citations']:
             st.write(c)
-
 
